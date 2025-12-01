@@ -15,67 +15,101 @@ st.set_page_config(
 # --- Data Loading Function ---
 @st.cache_data
 def load_data():
-    # Try to load the file from the root directory
     try:
+        # Load the dataset
         df = pd.read_csv('df_new.csv')
-        # Ensure timestamp is datetime if needed
+        # Ensure timestamp is datetime
         if 'Timestamp' in df.columns:
             df['Timestamp'] = pd.to_datetime(df['Timestamp'])
         return df
     except FileNotFoundError:
-        st.error("File 'df_new.csv' not found. Please ensure it is in the repository.")
         return None
 
 df = load_data()
 
-# --- Helper Function for Bell Curves ---
-def create_distribution_chart(data, column_name, title, color_seq, setpoint=None, usl=None, lsl=None):
+# --- Advanced Charting Function ---
+def create_distribution_chart(data, column_name, title, color_hex, setpoint=None, usl=None, lsl=None, show_ucl_lcl=False):
     """
-    Generates an interactive Plotly chart with Histogram + Bell Curve + Limits
+    Generates an interactive Plotly chart with Histogram, Bell Curve, and detailed Legend.
+    Values are shown in the legend to prevent overlap on the chart.
     """
     mu, std = norm.fit(data)
     
-    # 1. Histogram
+    # Calculate Control Limits (3 Sigma)
+    ucl = mu + 3 * std
+    lcl = mu - 3 * std
+    
+    # 1. Base Histogram
     fig = px.histogram(
         data, 
         x=column_name, 
         nbins=40, 
         histnorm='probability density',
         title=title,
-        color_discrete_sequence=[color_seq],
-        opacity=0.7
+        color_discrete_sequence=[color_hex],
+        opacity=0.6
     )
-
-    # 2. Bell Curve (Normal Distribution)
+    
+    # Calculate Y-axis max to scale the lines properly
+    # (We estimate the peak of the PDF to set line heights)
     x_range = np.linspace(data.min(), data.max(), 100)
     pdf = norm.pdf(x_range, mu, std)
-    
+    y_max = max(pdf) * 1.1 # Add 10% headroom
+
+    # 2. Add Bell Curve
     fig.add_trace(go.Scatter(
         x=x_range, y=pdf, 
         mode='lines', 
         name='Normal Dist', 
-        line=dict(color='red', width=2)
+        line=dict(color='darkred', width=2)
     ))
 
-    # 3. Mean Line
-    fig.add_vline(x=mu, line_width=2, line_dash="dash", line_color="black", annotation_text=f"Mean: {mu:.2f}")
+    # --- HELPER: Function to add vertical lines to Legend ---
+    def add_line(value, name, color, dash_style):
+        fig.add_trace(go.Scatter(
+            x=[value, value], 
+            y=[0, y_max],
+            mode='lines',
+            name=f"{name}: {value:.2f}", # Value printed in Legend
+            line=dict(color=color, width=2, dash=dash_style)
+        ))
 
-    # 4. Setpoint (if provided)
+    # 3. Add Lines (Order determines legend order)
+    
+    # Mean (Always show)
+    add_line(mu, "Mean", "black", "dash")
+    
+    # Setpoint
     if setpoint is not None:
-        fig.add_vline(x=setpoint, line_width=2, line_dash="dashdot", line_color="blue", annotation_text=f"SP: {setpoint}")
+        add_line(setpoint, "Setpoint", "blue", "dashdot")
 
-    # 5. USL/LSL (if provided)
+    # USL / LSL
     if usl is not None and lsl is not None:
-        fig.add_vline(x=usl, line_width=2, line_color="red", annotation_text="USL")
-        fig.add_vline(x=lsl, line_width=2, line_color="red", annotation_text="LSL")
-        
-        # Add Control Limits (3 Sigma)
-        ucl = mu + 3 * std
-        lcl = mu - 3 * std
-        fig.add_vline(x=ucl, line_width=2, line_dash="dot", line_color="purple", annotation_text="UCL")
-        fig.add_vline(x=lcl, line_width=2, line_dash="dot", line_color="purple", annotation_text="LCL")
+        add_line(usl, "USL", "red", "solid")
+        add_line(lsl, "LSL", "red", "solid")
 
-    fig.update_layout(bargap=0.1, template="plotly_white", height=400)
+    # UCL / LCL (Calculated)
+    if show_ucl_lcl:
+        add_line(ucl, "UCL (3σ)", "purple", "dot")
+        add_line(lcl, "LCL (3σ)", "purple", "dot")
+
+    # Layout Updates
+    fig.update_layout(
+        bargap=0.1, 
+        template="plotly_white", 
+        height=450,
+        legend=dict(
+            orientation="v", # Vertical legend
+            yanchor="top", 
+            y=1, 
+            xanchor="right", 
+            x=1.15, # Move legend slightly outside to the right
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="Black",
+            borderwidth=1
+        ),
+        margin=dict(r=150) # Add right margin to accommodate legend
+    )
     return fig
 
 # --- Main Dashboard Layout ---
@@ -85,90 +119,86 @@ if df is not None:
     st.markdown("### QualSteam Temperature & Pressure Control Analysis")
     st.divider()
 
-    # --- KPI Row (Key Performance Indicators) ---
+    # --- KPI Row ---
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     
+    # Calculate Cpk for Process Temp (Target 60, Tol +/- 1)
+    sigma = df['Process Temp'].std()
+    mu = df['Process Temp'].mean()
+    usl_temp = 61.0
+    lsl_temp = 59.0
+    cpk = min((usl_temp - mu) / (3 * sigma), (mu - lsl_temp) / (3 * sigma))
+
     with kpi1:
-        st.metric(
-            label="Avg Inlet Pressure", 
-            value=f"{df['Inlet Steam Pressure'].mean():.2f} bar"
-        )
+        st.metric("Avg Inlet Pressure", f"{df['Inlet Steam Pressure'].mean():.2f} bar")
     with kpi2:
-        st.metric(
-            label="Avg Valve Opening", 
-            value=f"{df['QualSteam Valve Opening'].mean():.1f}%"
-        )
+        st.metric("Avg Valve Opening", f"{df['QualSteam Valve Opening'].mean():.1f}%")
     with kpi3:
-        st.metric(
-            label="Avg Outlet Pressure", 
-            value=f"{df['Outlet Steam Pressure'].mean():.2f} bar",
-            delta=f"{df['Outlet Steam Pressure'].mean() - 2.5:.2f} vs SP"
-        )
+        st.metric("Avg Outlet Pressure", f"{df['Outlet Steam Pressure'].mean():.2f} bar")
     with kpi4:
-        st.metric(
-            label="Avg Process Temp", 
-            value=f"{df['Process Temp'].mean():.2f} °C",
-            delta=f"{df['Process Temp'].mean() - 60:.2f} vs SP"
-        )
+        st.metric("Process Temp Cpk", f"{cpk:.2f}", delta="Target > 1.33")
 
     st.divider()
 
-    # --- Row 1: Input Variables ---
-    st.subheader("1. Input Variables Analysis")
-    row1_col1, row1_col2 = st.columns(2)
+    # --- Row 1 ---
+    col1, col2 = st.columns(2)
 
-    with row1_col1:
-        fig_p1 = create_distribution_chart(
+    with col1:
+        st.subheader("1. Inlet Steam Pressure (P1)")
+        fig1 = create_distribution_chart(
             df['Inlet Steam Pressure'], 
             'Inlet Steam Pressure', 
-            'Inlet Steam Pressure (P1) Distribution',
+            'Inlet Pressure Distribution', 
             'skyblue'
         )
-        st.plotly_chart(fig_p1, use_container_width=True)
+        st.plotly_chart(fig1, use_container_width=True)
 
-    with row1_col2:
-        fig_valve = create_distribution_chart(
+    with col2:
+        st.subheader("2. QualSteam Valve Opening")
+        fig2 = create_distribution_chart(
             df['QualSteam Valve Opening'], 
             'QualSteam Valve Opening', 
-            'QualSteam Valve Opening Distribution',
+            'Valve Opening Distribution', 
             'lightgreen'
         )
-        st.plotly_chart(fig_valve, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
-    # --- Row 2: Output & Control Variables ---
-    st.subheader("2. Output & Control Analysis")
-    row2_col1, row2_col2 = st.columns(2)
+    # --- Row 2 ---
+    col3, col4 = st.columns(2)
 
-    with row2_col1:
-        fig_outlet = create_distribution_chart(
+    with col3:
+        st.subheader("3. Outlet Steam Pressure")
+        fig3 = create_distribution_chart(
             df['Outlet Steam Pressure'], 
             'Outlet Steam Pressure', 
-            'Outlet Steam Pressure vs Setpoint (2.5)',
+            'Outlet Pressure Distribution', 
             'skyblue',
             setpoint=2.5
         )
-        st.plotly_chart(fig_outlet, use_container_width=True)
+        st.plotly_chart(fig3, use_container_width=True)
 
-    with row2_col2:
-        # Define specifications for Process Temp
-        SP_TEMP = 60.0
-        USL_TEMP = SP_TEMP + 1
-        LSL_TEMP = SP_TEMP - 1
+    with col4:
+        st.subheader("4. Process Temp Capability")
+        # Spec Limits
+        SP = 60.0
+        USL = SP + 1
+        LSL = SP - 1
         
-        fig_temp = create_distribution_chart(
+        fig4 = create_distribution_chart(
             df['Process Temp'], 
             'Process Temp', 
-            'Process Temp Capability (SP=60, USL/LSL=±1)',
+            'Process Temp Capability Analysis', 
             'orange',
-            setpoint=SP_TEMP,
-            usl=USL_TEMP,
-            lsl=LSL_TEMP
+            setpoint=SP,
+            usl=USL,
+            lsl=LSL,
+            show_ucl_lcl=True # Enable UCL/LCL for this plot
         )
-        st.plotly_chart(fig_temp, use_container_width=True)
+        st.plotly_chart(fig4, use_container_width=True)
 
-    # --- Data Preview Section ---
-    with st.expander("View Raw Data"):
-        st.dataframe(df)
+    # --- Data Table ---
+    with st.expander("📝 View Raw Data"):
+        st.dataframe(df.sort_values(by='Timestamp', ascending=False).head(100))
 
 else:
-    st.warning("Please upload the dataset to the repository.")
+    st.error("File 'df_new.csv' not found. Please upload it to your GitHub repository.")
